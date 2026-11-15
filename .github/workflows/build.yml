@@ -1,4 +1,4 @@
-name: Build BiggerTask (X11)
+name: Build BiggerTask (X11 and Wayland playback)
 
 on:
   push:
@@ -15,7 +15,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential qt6-base-dev qt6-base-dev-tools \
-            libx11-dev libxi-dev libxtst-dev libxext-dev libxfixes-dev libxrandr-dev
+            libx11-dev libxi-dev libxtst-dev libxext-dev libxfixes-dev libxrandr-dev \
+            libei-dev liboeffis-dev
       - name: Build
         run: |
           qmake6 BiggerTask.pro
