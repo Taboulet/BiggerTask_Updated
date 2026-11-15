@@ -831,6 +831,13 @@ if (seq.size() >= 3) {
             if (e.type == Event::MouseMove) { o["type"]="mm"; o["x"]=e.x; o["y"]=e.y; }
             else if (e.type == Event::MouseButton) { o["type"]="mb"; o["x"]=e.x; o["y"]=e.y; o["btn"]=e.button; o["down"]=e.pressed; }
             else { o["type"]="key"; o["code"]=(int)e.keycode; o["down"]=e.pressed; }
+            // Optional v1 extensions: old readers ignore these fields; new readers
+            // can restore monitor-relative absolute coordinates on multi-monitor setups.
+            if (!e.monitor.isEmpty()) {
+                o["monitor"] = e.monitor;
+                o["relx"] = e.relx;
+                o["rely"] = e.rely;
+            }
             arr.append(o);
         }
         QJsonObject root; root["format"]="recq-v1"; root["events"]=arr;
@@ -847,6 +854,9 @@ if (seq.size() >= 3) {
                 if (type=="mm") { e.type=Event::MouseMove; e.x=o.value("x").toInt(); e.y=o.value("y").toInt(); }
                 else if (type=="mb") { e.type=Event::MouseButton; e.x=o.value("x").toInt(); e.y=o.value("y").toInt(); e.button=o.value("btn").toInt(); e.pressed=o.value("down").toBool(); }
                 else if (type=="key") { e.type=Event::Key; e.keycode=o.value("code").toInt(); e.pressed=o.value("down").toBool(); }
+                e.monitor = o.value("monitor").toString();
+                e.relx = o.value("relx").toInt();
+                e.rely = o.value("rely").toInt();
                 out.push_back(e);
             }
         } else if (doc.isArray()) {
@@ -855,6 +865,9 @@ if (seq.size() >= 3) {
                 if (type=="mm") { e.type=Event::MouseMove; e.x=o.value("x").toInt(); e.y=o.value("y").toInt(); }
                 else if (type=="mb") { e.type=Event::MouseButton; e.x=o.value("x").toInt(); e.y=o.value("y").toInt(); e.button=o.value("btn").toInt(); e.pressed=o.value("down").toBool(); }
                 else if (type=="key") { e.type=Event::Key; e.keycode=o.value("code").toInt(); e.pressed=o.value("down").toBool(); }
+                e.monitor = o.value("monitor").toString();
+                e.relx = o.value("relx").toInt();
+                e.rely = o.value("rely").toInt();
                 out.push_back(e);
             }
         }
