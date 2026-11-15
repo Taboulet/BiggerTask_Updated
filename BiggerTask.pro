@@ -1,5 +1,6 @@
 QT += widgets
-CONFIG += c++17
+CONFIG += c++17 link_pkgconfig
+PKGCONFIG += libei-1.0 liboeffis-1.0
 TEMPLATE = app
 TARGET = BiggerTask
 
