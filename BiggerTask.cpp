@@ -36,6 +36,10 @@
 #include <thread>
 #include <chrono>
 #include <map>
+#include <poll.h>
+#include <linux/input-event-codes.h>
+#include <libei.h>
+#include <liboeffis.h>
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
@@ -52,6 +56,7 @@ struct Event {
     int button{0};
     bool pressed{false};
     unsigned int keycode{0};
+    unsigned int evdevCode{0}; // Linux input-event code; zero for legacy .recq files
     QString monitor;
     int relx{0}, rely{0};
 };
@@ -175,7 +180,7 @@ signals:
 protected:
     void run() override {
         running = true;
-        if (isWaylandSession()) { emit status(unsupportedWaylandMessage()); return; }
+        if (isWaylandSession()) { playWayland(); return; }
         Display *dpy = XOpenDisplay(nullptr);
         if (!dpy) { emit status("Failed to open X display"); return; }
         int xi_opcode, event, error;
@@ -241,6 +246,7 @@ protected:
                 case XI_RawKeyRelease: {
                     auto *re = (XIRawEvent*)ev.xcookie.data;
                     Event e; e.type = Event::Key; e.ms_since_start = t; e.keycode = (unsigned)re->detail;
+                    e.evdevCode = re->detail >= 8 ? (unsigned)re->detail - 8 : 0;
                     e.pressed = (ev.xcookie.evtype == XI_RawKeyPress);
                     events.push_back(e);
                     break;
@@ -280,6 +286,223 @@ public:
 signals:
     void status(const QString &s);
 protected:
+
+    bool playWayland() {
+        struct oeffis *portal = oeffis_new(nullptr);
+        if (!portal) {
+            emit status("Could not initialize the Wayland RemoteDesktop portal.");
+            return false;
+        }
+
+        emit status("Requesting Wayland input permission...");
+        oeffis_create_session(portal, OEFFIS_DEVICE_KEYBOARD | OEFFIS_DEVICE_POINTER);
+
+        int portalFd = oeffis_get_fd(portal);
+        bool connected = false;
+        const auto connectDeadline = now_ms() + 30000;
+        while (running && now_ms() < connectDeadline && !connected) {
+            pollfd pfd{portalFd, POLLIN, 0};
+            int rc = poll(&pfd, 1, 100);
+            if (rc > 0 && (pfd.revents & POLLIN)) {
+                oeffis_dispatch(portal);
+                for (;;) {
+                    const auto pe = oeffis_get_event(portal);
+                    if (pe == OEFFIS_EVENT_NONE) break;
+                    if (pe == OEFFIS_EVENT_CONNECTED_TO_EIS) connected = true;
+                    else if (pe == OEFFIS_EVENT_DISCONNECTED || pe == OEFFIS_EVENT_CLOSED) {
+                        const char *why = oeffis_get_error_message(portal);
+                        emit status(QString("Wayland portal closed: %1").arg(why ? why : "connection ended"));
+                        oeffis_unref(portal);
+                        return false;
+                    }
+                }
+            }
+        }
+        if (!running || !connected) {
+            emit status("Wayland input permission was not granted or the portal timed out.");
+            oeffis_unref(portal);
+            return false;
+        }
+
+        const int eisFd = oeffis_get_eis_fd(portal);
+        if (eisFd < 0) {
+            emit status("The Wayland portal did not provide an EIS connection.");
+            oeffis_unref(portal);
+            return false;
+        }
+
+        struct ei *ei = ei_new_sender(nullptr);
+        if (!ei || ei_setup_backend_fd(ei, eisFd) != 0) {
+            emit status("Could not initialize the libei Wayland input connection.");
+            if (ei) ei_unref(ei);
+            close(eisFd);
+            oeffis_unref(portal);
+            return false;
+        }
+
+        struct ei_device *pointer = nullptr;
+        struct ei_device *keyboard = nullptr;
+        auto dispatchEi = [&]() {
+            const int fd = ei_get_fd(ei);
+            pollfd pfd{fd, POLLIN, 0};
+            if (fd >= 0 && poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN))
+                ei_dispatch(ei);
+
+            for (;;) {
+                struct ei_event *event = ei_get_event(ei);
+                if (!event) break;
+                const auto type = ei_event_get_type(event);
+                if (type == EI_EVENT_SEAT_ADDED) {
+                    struct ei_seat *seat = ei_event_get_seat(event);
+                    if (seat) {
+                        if (ei_seat_has_capability(seat, EI_DEVICE_CAP_POINTER_ABSOLUTE))
+                            ei_seat_bind_capability(seat, EI_DEVICE_CAP_POINTER_ABSOLUTE);
+                        else if (ei_seat_has_capability(seat, EI_DEVICE_CAP_POINTER))
+                            ei_seat_bind_capability(seat, EI_DEVICE_CAP_POINTER);
+                        if (ei_seat_has_capability(seat, EI_DEVICE_CAP_KEYBOARD))
+                            ei_seat_bind_capability(seat, EI_DEVICE_CAP_KEYBOARD);
+                    }
+                } else if (type == EI_EVENT_DEVICE_RESUMED) {
+                    struct ei_device *device = ei_event_get_device(event);
+                    if (device) {
+                        if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER_ABSOLUTE) ||
+                            ei_device_has_capability(device, EI_DEVICE_CAP_POINTER)) {
+                            if (pointer) ei_device_unref(pointer);
+                            pointer = ei_device_ref(device);
+                            ei_device_start_emulating(pointer);
+                        }
+                        if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD)) {
+                            if (keyboard) ei_device_unref(keyboard);
+                            keyboard = ei_device_ref(device);
+                            ei_device_start_emulating(keyboard);
+                        }
+                    }
+                } else if (type == EI_EVENT_DEVICE_PAUSED) {
+                    struct ei_device *device = ei_event_get_device(event);
+                    if (device == pointer) { ei_device_unref(pointer); pointer = nullptr; }
+                    if (device == keyboard) { ei_device_unref(keyboard); keyboard = nullptr; }
+                } else if (type == EI_EVENT_DISCONNECT) {
+                    ei_event_unref(event);
+                    return false;
+                }
+                ei_event_unref(event);
+            }
+            return true;
+        };
+
+        emit status("Wayland portal connected; preparing input devices...");
+        const auto deviceDeadline = now_ms() + 10000;
+        while (running && now_ms() < deviceDeadline && (!pointer || !keyboard)) {
+            dispatchEi();
+            pollfd pfds[2] = {{ei_get_fd(ei), POLLIN, 0}, {portalFd, POLLIN, 0}};
+            poll(pfds, 2, 50);
+            if (pfds[0].revents & POLLIN) ei_dispatch(ei);
+            if (pfds[1].revents & POLLIN) oeffis_dispatch(portal);
+        }
+
+        if (!running || !pointer || !keyboard) {
+            emit status("The compositor did not provide both pointer and keyboard devices.");
+            if (pointer) { ei_device_stop_emulating(pointer); ei_device_unref(pointer); }
+            if (keyboard) { ei_device_stop_emulating(keyboard); ei_device_unref(keyboard); }
+            ei_unref(ei);
+            oeffis_unref(portal);
+            return false;
+        }
+
+        auto moveAbsolute = [&](int x, int y) -> bool {
+            if (!ei_device_has_capability(pointer, EI_DEVICE_CAP_POINTER_ABSOLUTE))
+                return false;
+            for (size_t n = 0; n < 32; ++n) {
+                struct ei_region *region = ei_device_get_region(pointer, n);
+                if (!region) break;
+                double px = x, py = y;
+                if (ei_region_contains(region, px, py) &&
+                    ei_region_convert_point(region, &px, &py)) {
+                    ei_device_pointer_motion_absolute(pointer, px, py);
+                    ei_device_frame(pointer);
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto linuxButton = [](int button) -> uint32_t {
+            switch (button) {
+                case 1: return BTN_LEFT;
+                case 2: return BTN_MIDDLE;
+                case 3: return BTN_RIGHT;
+                case 4: return BTN_SIDE;
+                case 5: return BTN_EXTRA;
+                default: return button >= 6 ? static_cast<uint32_t>(button + 0x10d) : 0;
+            }
+        };
+
+        std::set<uint32_t> heldKeys;
+        std::set<uint32_t> heldButtons;
+        emit status(QString("Playing on Wayland (%1 loops, speed x%2)...").arg(loops).arg(speed));
+        bool ok = true;
+        for (int loop = 0; loop < loops && running && ok; ++loop) {
+            const auto start = now_ms();
+            for (const auto &e : events) {
+                if (!running) break;
+                const auto target = start + static_cast<std::int64_t>(e.ms_since_start / speed);
+                while (running && now_ms() < target) {
+                    dispatchEi();
+                    const auto remaining = target - now_ms();
+                    pollfd pfds[2] = {{ei_get_fd(ei), POLLIN, 0}, {portalFd, POLLIN, 0}};
+                    poll(pfds, 2, static_cast<int>(std::min<std::int64_t>(remaining, 20)));
+                    if (pfds[0].revents & POLLIN) ei_dispatch(ei);
+                    if (pfds[1].revents & POLLIN) oeffis_dispatch(portal);
+                }
+                if (!running) break;
+                if (!dispatchEi()) { ok = false; break; }
+
+                if (e.type == Event::MouseMove) {
+                    if (!moveAbsolute(e.x, e.y)) {
+                        emit status("This Wayland compositor did not expose an absolute pointer region for the recorded position.");
+                        ok = false;
+                        break;
+                    }
+                } else if (e.type == Event::MouseButton) {
+                    if (!moveAbsolute(e.x, e.y)) {
+                        emit status("This Wayland compositor did not expose an absolute pointer region for the recorded click.");
+                        ok = false;
+                        break;
+                    }
+                    const uint32_t button = linuxButton(e.button);
+                    if (!button) continue;
+                    ei_device_pointer_button(pointer, button, e.pressed);
+                    ei_device_frame(pointer);
+                    if (e.pressed) heldButtons.insert(button); else heldButtons.erase(button);
+                } else if (e.type == Event::Key) {
+                    // X11 keycodes are evdev codes + 8 on Linux. New recordings
+                    // persist the evdev value explicitly; old .recq files use this fallback.
+                    const uint32_t code = e.evdevCode ? e.evdevCode :
+                        (e.keycode >= 8 ? e.keycode - 8 : e.keycode);
+                    if (code == 0) continue;
+                    ei_device_keyboard_key(keyboard, code, e.pressed);
+                    ei_device_frame(keyboard);
+                    if (e.pressed) heldKeys.insert(code); else heldKeys.erase(code);
+                }
+            }
+        }
+
+        for (const auto code : heldKeys) {
+            ei_device_keyboard_key(keyboard, code, false);
+            ei_device_frame(keyboard);
+        }
+        for (const auto button : heldButtons) {
+            ei_device_pointer_button(pointer, button, false);
+            ei_device_frame(pointer);
+        }
+        if (pointer) { ei_device_stop_emulating(pointer); ei_device_unref(pointer); }
+        if (keyboard) { ei_device_stop_emulating(keyboard); ei_device_unref(keyboard); }
+        ei_unref(ei);
+        oeffis_unref(portal);
+        if (ok && running) emit status("Playback finished.");
+        return ok;
+    }
+
     void run() override {
         if (events.empty()) { emit status("No events to play"); return; }
         running = true;
@@ -875,6 +1098,7 @@ if (seq.size() >= 3) {
             else { o["type"]="key"; o["code"]=(int)e.keycode; o["down"]=e.pressed; }
             // Optional v1 extensions: old readers ignore these fields; new readers
             // can restore monitor-relative absolute coordinates on multi-monitor setups.
+            if (e.evdevCode) o["evdevCode"] = static_cast<int>(e.evdevCode);
             if (!e.monitor.isEmpty()) {
                 o["monitor"] = e.monitor;
                 o["relx"] = e.relx;
@@ -896,6 +1120,8 @@ if (seq.size() >= 3) {
                 if (type=="mm") { e.type=Event::MouseMove; e.x=o.value("x").toInt(); e.y=o.value("y").toInt(); }
                 else if (type=="mb") { e.type=Event::MouseButton; e.x=o.value("x").toInt(); e.y=o.value("y").toInt(); e.button=o.value("btn").toInt(); e.pressed=o.value("down").toBool(); }
                 else if (type=="key") { e.type=Event::Key; e.keycode=o.value("code").toInt(); e.pressed=o.value("down").toBool(); }
+                e.evdevCode = static_cast<unsigned int>(o.value("evdevCode").toInt());
+                e.evdevCode = static_cast<unsigned int>(o.value("evdevCode").toInt());
                 e.monitor = o.value("monitor").toString();
                 e.relx = o.value("relx").toInt();
                 e.rely = o.value("rely").toInt();
