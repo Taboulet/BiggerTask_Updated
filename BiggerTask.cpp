@@ -32,6 +32,7 @@
 #include <unordered_set>
 #include <set>
 #include <algorithm>
+#include <cmath>
 #include <thread>
 #include <chrono>
 #include <map>
@@ -276,8 +277,18 @@ protected:
         if (events.empty()) { emit status("No events to play"); return; }
         running = true;
         if (isWaylandSession()) { emit status(unsupportedWaylandMessage()); return; }
+        if (!(speed > 0.0) || !std::isfinite(speed)) {
+            emit status("Playback speed must be a finite value greater than zero.");
+            return;
+        }
         Display *dpy = XOpenDisplay(nullptr);
         if (!dpy) { emit status("Failed to open X display"); return; }
+        int xtestEventBase = 0, xtestErrorBase = 0, xtestMajor = 0, xtestMinor = 0;
+        if (!XTestQueryExtension(dpy, &xtestEventBase, &xtestErrorBase, &xtestMajor, &xtestMinor)) {
+            emit status("XTest extension not available; playback cannot inject input.");
+            XCloseDisplay(dpy);
+            return;
+        }
         emit status(QString("Playing (%1 loops, speed x%2)...").arg(loops).arg(speed));
 
         auto auto_release = [&](int button) {
@@ -299,22 +310,19 @@ protected:
                 }
                 switch (e.type) {
                     case Event::MouseMove: {
-                        int absx = e.x, absy = e.y;
-                        if (!e.monitor.isEmpty()) {
-                            MonitorInfo mi = findMonitorByName(dpy, e.monitor);
-                            if (!mi.name.isEmpty()) { absx = mi.x + e.relx; absy = mi.y + e.rely; }
-                        }
-                        XTestFakeMotionEvent(dpy, -1, absx, absy, 0); XFlush(dpy);
+                        // Coordinates in .recq are absolute desktop/root coordinates.
+                        // Do not remap through monitor-relative metadata: that would
+                        // change the recorded location when monitor layouts change.
+                        XTestFakeMotionEvent(dpy, -1, e.x, e.y, 0);
+                        XFlush(dpy);
                         break;
                     }
                     case Event::MouseButton: {
-                        int absx = e.x, absy = e.y;
-                        if (!e.monitor.isEmpty()) {
-                            MonitorInfo mi = findMonitorByName(dpy, e.monitor);
-                            if (!mi.name.isEmpty()) { absx = mi.x + e.relx; absy = mi.y + e.rely;
-                                XTestFakeMotionEvent(dpy, -1, absx, absy, 0); }
-                        }
-                        XTestFakeButtonEvent(dpy, e.button, e.pressed, 0); XFlush(dpy);
+                        // Restore the pointer to the exact absolute position captured
+                        // with the button event before injecting the click.
+                        XTestFakeMotionEvent(dpy, -1, e.x, e.y, 0);
+                        XTestFakeButtonEvent(dpy, e.button, e.pressed, 0);
+                        XFlush(dpy);
                         if (e.pressed) {
                             bool nextIsRelease = false;
                             if (i + 1 < events.size()) {
