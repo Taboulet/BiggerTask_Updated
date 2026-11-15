@@ -970,7 +970,8 @@ private:
 
     Q_SLOT void onTogglePlay() {
     if (activePlayer) {
-        // Already playing — ignore Start Playback hotkey
+        // The same control becomes Stop while playback is active.
+        activePlayer->stop();
         return;
     }
 
