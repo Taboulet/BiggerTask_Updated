@@ -360,6 +360,10 @@ protected:
                             ei_seat_bind_capability(seat, EI_DEVICE_CAP_POINTER_ABSOLUTE);
                         else if (ei_seat_has_capability(seat, EI_DEVICE_CAP_POINTER))
                             ei_seat_bind_capability(seat, EI_DEVICE_CAP_POINTER);
+                        if (ei_seat_has_capability(seat, EI_DEVICE_CAP_BUTTON))
+                            ei_seat_bind_capability(seat, EI_DEVICE_CAP_BUTTON);
+                        if (ei_seat_has_capability(seat, EI_DEVICE_CAP_SCROLL))
+                            ei_seat_bind_capability(seat, EI_DEVICE_CAP_SCROLL);
                         if (ei_seat_has_capability(seat, EI_DEVICE_CAP_KEYBOARD))
                             ei_seat_bind_capability(seat, EI_DEVICE_CAP_KEYBOARD);
                     }
