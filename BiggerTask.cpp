@@ -706,14 +706,20 @@ private:
         if (!activeRecorder) {
             activeRecorder = new RecorderThread(this);
             connect(activeRecorder, &RecorderThread::status, this, [this](const QString &s){ status->setText(s); });
-            connect(activeRecorder, &RecorderThread::finishedRecording, this, [this](const QString &s){
-                status->setText(s);
+            connect(activeRecorder, &RecorderThread::finishedRecording, this, [this](const QString &summary){
+                status->setText(summary);
                 recorded = activeRecorder->events;
+            });
+            // QThread::finished also fires on early backend errors (including the
+            // intentionally unsupported Wayland path), so the controls never stick.
+            connect(activeRecorder, &QThread::finished, this, [this]() {
                 btnRecord->setText("Record");
-                btnPlay->setEnabled(true);
+                btnPlay->setEnabled(!recorded.empty());
                 btnSave->setEnabled(!recorded.empty());
-                activeRecorder->deleteLater();
-                activeRecorder = nullptr;
+                if (activeRecorder) {
+                    activeRecorder->deleteLater();
+                    activeRecorder = nullptr;
+                }
             });
             activeRecorder->start();
             btnRecord->setText("Stop");
@@ -739,10 +745,14 @@ private:
 
         connect(activePlayer, &PlayerThread::status, this, [this](const QString &s){
             status->setText(s);
-            if (s.contains("finished", Qt::CaseInsensitive) || s.contains("Stopped", Qt::CaseInsensitive)) {
-                btnPlay->setText("Play");
-                btnRecord->setEnabled(true);
-                if (activePlayer) { activePlayer->deleteLater(); activePlayer = nullptr; }
+        });
+        // Handle normal completion, stop, and backend startup failures uniformly.
+        connect(activePlayer, &QThread::finished, this, [this]() {
+            btnPlay->setText("Play");
+            btnRecord->setEnabled(true);
+            if (activePlayer) {
+                activePlayer->deleteLater();
+                activePlayer = nullptr;
             }
         });
 
