@@ -474,14 +474,14 @@ protected:
                         if (e.pressed) {
                             const int horizontal = (e.button == 6) ? -120 : (e.button == 7 ? 120 : 0);
                             const int vertical = (e.button == 4) ? 120 : (e.button == 5 ? -120 : 0);
-                            ei_device_pointer_scroll_discrete(pointer, horizontal, vertical);
+                            ei_device_scroll_discrete(pointer, horizontal, vertical);
                             ei_device_frame(pointer);
                         }
                         continue;
                     }
                     const uint32_t button = linuxButton(e.button);
                     if (!button) continue;
-                    ei_device_pointer_button(pointer, button, e.pressed);
+                    ei_device_button_button(pointer, button, e.pressed);
                     ei_device_frame(pointer);
                     if (e.pressed) heldButtons.insert(button); else heldButtons.erase(button);
                 } else if (e.type == Event::Key) {
@@ -502,7 +502,7 @@ protected:
             ei_device_frame(keyboard);
         }
         for (const auto button : heldButtons) {
-            ei_device_pointer_button(pointer, button, false);
+            ei_device_button_button(pointer, button, false);
             ei_device_frame(pointer);
         }
         if (pointer) { ei_device_stop_emulating(pointer); ei_device_unref(pointer); }
