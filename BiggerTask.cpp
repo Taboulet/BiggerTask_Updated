@@ -60,6 +60,19 @@ struct MonitorInfo {
     int x, y, width, height;
 };
 
+// ---------- Display session detection ----------
+// Do not mistake an XWayland DISPLAY for a complete X11 desktop session.
+// XInput2/XTest only cover X11 clients and cannot implement global Wayland input.
+static bool isWaylandSession() {
+    const QByteArray sessionType = qgetenv("XDG_SESSION_TYPE").toLower();
+    return qEnvironmentVariableIsSet("WAYLAND_DISPLAY") || sessionType == "wayland";
+}
+
+static QString unsupportedWaylandMessage() {
+    return "Wayland session detected: this build has no portal/EIS input backend. "
+           "Use an X11 session for recording and playback; XWayland is not full Wayland support.";
+}
+
 // ---------- Helpers ----------
 static MonitorInfo findMonitorForPoint(Display* dpy, int x, int y) {
     MonitorInfo result{"",0,0,0,0};
@@ -154,6 +167,7 @@ signals:
 protected:
     void run() override {
         running = true;
+        if (isWaylandSession()) { emit status(unsupportedWaylandMessage()); return; }
         Display *dpy = XOpenDisplay(nullptr);
         if (!dpy) { emit status("Failed to open X display"); return; }
         int xi_opcode, event, error;
@@ -261,6 +275,7 @@ protected:
     void run() override {
         if (events.empty()) { emit status("No events to play"); return; }
         running = true;
+        if (isWaylandSession()) { emit status(unsupportedWaylandMessage()); return; }
         Display *dpy = XOpenDisplay(nullptr);
         if (!dpy) { emit status("Failed to open X display"); return; }
         emit status(QString("Playing (%1 loops, speed x%2)...").arg(loops).arg(speed));
@@ -338,6 +353,7 @@ signals:
 protected:
     void run() override {
         running = true;
+        if (isWaylandSession()) return;
         Display *dpy = XOpenDisplay(nullptr);
         if (!dpy) return;
         int xi_opcode, event, error;
@@ -450,6 +466,7 @@ signals:
 public slots:
     void run() {
         running = true;
+        if (isWaylandSession()) { emit finished(); return; }
         Display *dpy = XOpenDisplay(nullptr);
         if (!dpy) { emit finished(); return; }
         int xi_opcode, event, error;
