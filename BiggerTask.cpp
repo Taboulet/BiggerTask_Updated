@@ -65,8 +65,15 @@ struct MonitorInfo {
 // Do not mistake an XWayland DISPLAY for a complete X11 desktop session.
 // XInput2/XTest only cover X11 clients and cannot implement global Wayland input.
 static bool isWaylandSession() {
-    const QByteArray sessionType = qgetenv("XDG_SESSION_TYPE").toLower();
-    return qEnvironmentVariableIsSet("WAYLAND_DISPLAY") || sessionType == "wayland";
+    const QByteArray sessionType = qgetenv("XDG_SESSION_TYPE").trimmed().toLower();
+
+    // Prefer the session manager's explicit type when available. Some launchers
+    // leave WAYLAND_DISPLAY in the environment even for an X11 login session.
+    if (sessionType == "x11") return false;
+    if (sessionType == "wayland") return true;
+
+    // Fall back to the display variable only when the session type is unknown.
+    return qEnvironmentVariableIsSet("WAYLAND_DISPLAY");
 }
 
 static QString unsupportedWaylandMessage() {
