@@ -343,6 +343,19 @@ protected:
 
         struct ei_device *pointer = nullptr;
         struct ei_device *keyboard = nullptr;
+        uint32_t emulationSequence = 0;
+        std::set<struct ei_device *> startedDevices;
+        auto startEmulating = [&](struct ei_device *device) {
+            if (device && startedDevices.insert(device).second)
+                ei_device_start_emulating(device, ++emulationSequence);
+        };
+        auto sendFrame = [](struct ei_device *device) {
+            timespec ts{};
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            const uint64_t timestamp = static_cast<uint64_t>(ts.tv_sec) * 1000000ULL +
+                                       static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
+            ei_device_frame(device, timestamp);
+        };
         auto dispatchEi = [&]() {
             const int fd = ei_get_fd(ei);
             pollfd pfd{fd, POLLIN, 0};
@@ -374,16 +387,18 @@ protected:
                             ei_device_has_capability(device, EI_DEVICE_CAP_POINTER)) {
                             if (pointer) ei_device_unref(pointer);
                             pointer = ei_device_ref(device);
-                            ei_device_start_emulating(pointer);
                         }
                         if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD)) {
                             if (keyboard) ei_device_unref(keyboard);
                             keyboard = ei_device_ref(device);
-                            ei_device_start_emulating(keyboard);
+                        }
+                        if (device == pointer || device == keyboard)
+                            startEmulating(device);
                         }
                     }
                 } else if (type == EI_EVENT_DEVICE_PAUSED) {
                     struct ei_device *device = ei_event_get_device(event);
+                    startedDevices.erase(device);
                     if (device == pointer) { ei_device_unref(pointer); pointer = nullptr; }
                     if (device == keyboard) { ei_device_unref(keyboard); keyboard = nullptr; }
                 } else if (type == EI_EVENT_DISCONNECT) {
@@ -424,7 +439,7 @@ protected:
                 if (ei_region_contains(region, px, py) &&
                     ei_region_convert_point(region, &px, &py)) {
                     ei_device_pointer_motion_absolute(pointer, px, py);
-                    ei_device_frame(pointer);
+                    sendFrame(pointer);
                     return true;
                 }
             }
@@ -495,7 +510,7 @@ protected:
                         (e.keycode >= 8 ? e.keycode - 8 : e.keycode);
                     if (code == 0) continue;
                     ei_device_keyboard_key(keyboard, code, e.pressed);
-                    ei_device_frame(keyboard);
+                    sendFrame(keyboard);
                     if (e.pressed) heldKeys.insert(code); else heldKeys.erase(code);
                 }
             }
@@ -509,8 +524,10 @@ protected:
             ei_device_button_button(pointer, button, false);
             ei_device_frame(pointer);
         }
-        if (pointer) { ei_device_stop_emulating(pointer); ei_device_unref(pointer); }
-        if (keyboard) { ei_device_stop_emulating(keyboard); ei_device_unref(keyboard); }
+        for (auto *device : startedDevices)
+            ei_device_stop_emulating(device);
+        if (pointer) ei_device_unref(pointer);
+        if (keyboard) ei_device_unref(keyboard);
         ei_unref(ei);
         oeffis_unref(portal);
         if (ok && running) emit status("Playback finished.");
