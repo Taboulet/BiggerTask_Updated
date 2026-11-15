@@ -1,0 +1,28 @@
+name: Build BiggerTask (X11)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential qt6-base-dev qt6-base-dev-tools \
+            libx11-dev libxi-dev libxtst-dev libxext-dev libxfixes-dev libxrandr-dev
+      - name: Build
+        run: |
+          qmake6 BiggerTask.pro
+          make -j"$(nproc)"
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: BiggerTask-linux-x11
+          path: BiggerTask
+          if-no-files-found: error
