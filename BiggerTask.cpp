@@ -37,6 +37,7 @@
 #include <chrono>
 #include <map>
 #include <poll.h>
+#include <unistd.h>
 #include <linux/input-event-codes.h>
 #include <libei.h>
 #include <liboeffis.h>
@@ -431,9 +432,9 @@ protected:
                 case 1: return BTN_LEFT;
                 case 2: return BTN_MIDDLE;
                 case 3: return BTN_RIGHT;
-                case 4: return BTN_SIDE;
-                case 5: return BTN_EXTRA;
-                default: return button >= 6 ? static_cast<uint32_t>(button + 0x10d) : 0;
+                case 8: return BTN_SIDE;
+                case 9: return BTN_EXTRA;
+                default: return 0;
             }
         };
 
@@ -468,6 +469,15 @@ protected:
                         emit status("This Wayland compositor did not expose an absolute pointer region for the recorded click.");
                         ok = false;
                         break;
+                    }
+                    if (e.button >= 4 && e.button <= 7) {
+                        if (e.pressed) {
+                            const int horizontal = (e.button == 6) ? -120 : (e.button == 7 ? 120 : 0);
+                            const int vertical = (e.button == 4) ? 120 : (e.button == 5 ? -120 : 0);
+                            ei_device_pointer_scroll_discrete(pointer, horizontal, vertical);
+                            ei_device_frame(pointer);
+                        }
+                        continue;
                     }
                     const uint32_t button = linuxButton(e.button);
                     if (!button) continue;
